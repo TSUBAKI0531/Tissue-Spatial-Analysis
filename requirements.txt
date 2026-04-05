@@ -1,0 +1,22 @@
+# === Core ===
+numpy
+pandas
+
+# === Image Processing ===
+scikit-image
+tifffile
+cellpose
+
+# === Machine Learning ===
+scikit-learn
+joblib
+
+# === Statistics & Spatial ===
+scipy
+
+# === Visualization ===
+matplotlib
+seaborn
+
+# === Web UI ===
+streamlit
