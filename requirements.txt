@@ -1,3 +1,10 @@
+# ============================================
+# Streamlit Cloud用 requirements.txt
+# ============================================
+# cellpose は PyTorch 依存が重いため Streamlit Cloud では除外。
+# ローカル実行時は requirements-local.txt を使用してください。
+# Cellpose無しでも scikit-image による代替セグメンテーションで動作します。
+
 # === Core ===
 numpy
 pandas
@@ -5,7 +12,6 @@ pandas
 # === Image Processing ===
 scikit-image
 tifffile
-cellpose
 
 # === Machine Learning ===
 scikit-learn

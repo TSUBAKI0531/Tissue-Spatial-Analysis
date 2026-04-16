@@ -1,0 +1,17 @@
+# 仮想環境（絶対に上げない）
+.venv/
+__pycache__/
+
+# 画像データ（重すぎるので上げない）
+data/input/
+data/output/
+*.tif
+*.tiff
+
+# 一時ファイル
+temp_*
+.streamlit/
+
+# テストデータ（ローカル検証用、リポジトリに含めない）
+test_model.joblib
+test_tissue_image.tif

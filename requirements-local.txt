@@ -1,0 +1,13 @@
+# ============================================
+# ローカル実行用 requirements.txt (Cellpose含む)
+# ============================================
+# ローカルのWSL/Linux環境で高精度なCellposeセグメンテーションを利用する場合:
+#   pip install -r requirements-local.txt
+#
+# Streamlit Cloudには requirements.txt を使用してください（cellposeは除外されています）。
+
+-r requirements.txt
+
+# Cellpose (深層学習による核セグメンテーション)
+cellpose
+torch

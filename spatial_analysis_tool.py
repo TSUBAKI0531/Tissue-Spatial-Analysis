@@ -11,7 +11,7 @@ spatial_analysis_tool.py - 組織切片の空間統計解析エンジン
     5. Mann-Whitney U検定による群間比較
 
 Graceful Degradation:
-    - Cellpose未インストール時 → セグメンテーションをスキップし警告
+    - Cellpose未インストール時 → scikit-image(Otsu+Watershed)による代替セグメンテーション
     - GPU不使用環境 → CPU自動フォールバック
     - 分類モデル未ロード → ランダム分類によるデモモード
 """
@@ -24,9 +24,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import stats
+from scipy import stats, ndimage as ndi
 from scipy.spatial import KDTree
-from skimage import measure
+from skimage import measure, filters, morphology, segmentation
+from skimage.feature import peak_local_max
 
 from config import (
     COLUMNS_TO_DROP_FOR_PREDICTION,
@@ -133,7 +134,7 @@ class SpatialAnalyzer:
         """CellposeモデルをGPUフォールバック付きで初期化"""
         if not CELLPOSE_AVAILABLE:
             self._warnings.append(
-                "cellpose未インストール: セグメンテーションは外部マスクが必要です。"
+                "cellpose未インストール: scikit-image代替セグメンテーションを使用します。"
             )
             return None
 
@@ -165,38 +166,122 @@ class SpatialAnalyzer:
     # ──────────────────────────────────────────
     # パイプラインメソッド
     # ──────────────────────────────────────────
+    @staticmethod
+    def _to_chw(image: np.ndarray) -> np.ndarray:
+        """画像を (C, H, W) 形式に正規化する
+
+        判定ロジック: 3次元配列のうち、最も小さい軸をチャンネル軸とみなす。
+        tifffileやskimage.ioはTIFFを (H, W, C) で返すことが多いため、
+        本ライブラリは内部表現を (C, H, W) に統一する。
+        """
+        if image.ndim == 2:
+            return image[np.newaxis, :, :]
+        if image.ndim != 3:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+
+        # 最小次元をチャンネルとみなす
+        min_axis = int(np.argmin(image.shape))
+        if min_axis == 0:
+            return image  # 既に (C, H, W)
+        return np.moveaxis(image, min_axis, 0)
+
     def segment(self, image: np.ndarray) -> np.ndarray:
-        """Cellposeによる核セグメンテーション
+        """核セグメンテーション (Cellpose → skimageフォールバック)
 
         Args:
-            image: 入力画像。shape = (C, H, W) を想定。
+            image: 入力画像。(C, H, W) または (H, W, C) を自動判定。
 
         Returns:
             masks: ラベルマスク (H, W)
-
-        Raises:
-            RuntimeError: Cellposeが利用不可の場合
         """
-        if self.cp_model is None:
-            raise RuntimeError(
-                "Cellposeが利用できません。外部マスクを使用してください。"
-            )
+        chw = self._to_chw(image)
+        # 最初のチャンネル(核シグナル)を使用
+        input_img = chw[0]
 
-        # チャンネルファースト → 最初のチャンネルを使用
-        if image.ndim == 3 and image.shape[0] < image.shape[-1]:
-            input_img = image[0]
-        else:
-            input_img = image
+        # ── Cellposeが利用可能な場合 ──
+        if self.cp_model is not None:
+            try:
+                masks, _, _, _ = self.cp_model.eval(
+                    input_img,
+                    diameter=self.cp_config.diameter,
+                    channels=self.cp_config.channels,
+                    flow_threshold=self.cp_config.flow_threshold,
+                    cellprob_threshold=self.cp_config.cellprob_threshold,
+                )
+                logger.info(f"Cellposeセグメンテーション完了: {masks.max()} 個の細胞を検出")
+                return masks
+            except Exception as e:
+                self._warnings.append(
+                    f"Cellpose実行失敗 ({e}) → skimageフォールバックを使用します。"
+                )
+                logger.warning(f"Cellpose failed, falling back to skimage: {e}")
 
-        masks, flows, styles, diams = self.cp_model.eval(
-            input_img,
-            diameter=self.cp_config.diameter,
-            channels=self.cp_config.channels,
-            flow_threshold=self.cp_config.flow_threshold,
-            cellprob_threshold=self.cp_config.cellprob_threshold,
+        # ── skimageフォールバック (Otsu + Watershed) ──
+        self._warnings.append(
+            "Cellpose未使用: scikit-image (Otsu + Watershed) でセグメンテーション中。"
         )
-        logger.info(f"セグメンテーション完了: {masks.max()} 個の細胞を検出")
-        return masks
+        return self._segment_skimage(input_img)
+
+    def _segment_skimage(self, img: np.ndarray) -> np.ndarray:
+        """scikit-imageによる代替セグメンテーション
+
+        手法:
+            1. Gaussianフィルタによるノイズ除去
+            2. Otsu閾値による二値化
+            3. モルフォロジー処理
+            4. 距離変換 + Watershedによる隣接細胞分離
+
+        Args:
+            img: 2D画像 (H, W)
+
+        Returns:
+            masks: ラベルマスク (H, W)
+        """
+        if img.ndim != 2:
+            raise ValueError(f"_segment_skimage expects 2D image, got shape {img.shape}")
+
+        # 正規化
+        img_norm = img.astype(np.float32)
+        if img_norm.max() > img_norm.min():
+            img_norm = (img_norm - img_norm.min()) / (img_norm.max() - img_norm.min())
+
+        # 1. ノイズ除去
+        smoothed = filters.gaussian(img_norm, sigma=1.5)
+
+        # 2. Otsu二値化
+        try:
+            threshold = filters.threshold_otsu(smoothed)
+        except ValueError:
+            threshold = 0.5
+        binary = smoothed > threshold
+
+        # 3. モルフォロジー処理: 小さなノイズを除去・穴埋め
+        #    新旧skimage両対応のためkwargsをバージョンで切り替え
+        try:
+            binary = morphology.remove_small_objects(binary, min_size=30)
+        except TypeError:
+            binary = morphology.remove_small_objects(binary, 30)
+        try:
+            binary = morphology.remove_small_holes(binary, area_threshold=20)
+        except TypeError:
+            binary = morphology.remove_small_holes(binary, 20)
+
+        # 4. 距離変換 + Watershedで隣接細胞を分離
+        distance = ndi.distance_transform_edt(binary)
+        local_max_coords = peak_local_max(
+            distance,
+            min_distance=7,
+            labels=binary,
+        )
+        local_max_mask = np.zeros_like(distance, dtype=bool)
+        if len(local_max_coords) > 0:
+            local_max_mask[tuple(local_max_coords.T)] = True
+        markers, _ = ndi.label(local_max_mask)
+        masks = segmentation.watershed(-distance, markers, mask=binary)
+
+        n_cells = int(masks.max())
+        logger.info(f"skimageセグメンテーション完了: {n_cells} 個の細胞を検出")
+        return masks.astype(np.int32)
 
     def extract_features(
         self, image: np.ndarray, masks: np.ndarray
@@ -204,19 +289,20 @@ class SpatialAnalyzer:
         """細胞ごとに輝度・面積・形状の特徴量を抽出
 
         Args:
-            image: 多チャンネル画像 (C, H, W)
+            image: 多チャンネル画像 (C, H, W) または (H, W, C)
             masks: ラベルマスク (H, W)
 
         Returns:
             DataFrame: 各細胞の特徴量テーブル
         """
-        # (C, H, W) → (H, W, C) に変換
-        if image.ndim == 3 and image.shape[0] < image.shape[-1]:
-            intensity_img = np.moveaxis(image, 0, -1)
+        # 形状正規化: (C, H, W) → (H, W, C)
+        if image.ndim == 3:
+            chw = self._to_chw(image)
+            intensity_img = np.moveaxis(chw, 0, -1)
         elif image.ndim == 2:
             intensity_img = image[:, :, np.newaxis]
         else:
-            intensity_img = image
+            raise ValueError(f"Unsupported image shape: {image.shape}")
 
         props = measure.regionprops_table(
             masks,
