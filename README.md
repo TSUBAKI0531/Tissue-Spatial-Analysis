@@ -1,111 +1,108 @@
-# 🔬 Tissue Spatial Analysis Application
+# Tissue Spatial Analysis
 
-蛍光組織切片画像を対象とした、細胞の空間分布解析と統計検定を行うStreamlitアプリケーション。
+蛍光組織切片画像における、がん細胞-正常細胞の空間近接度とバイオマーカー発現の統計解析ツール。
 
-## 概要
+## 解決した課題
 
-本ツールは、蛍光多重染色された組織切片画像に対して以下のパイプラインを実行します。
+蛍光多重染色した組織切片を手動で観察する場合、「がん細胞が正常細胞の近くにあるか遠くにあるかで、バイオマーカー発現量が変わるか」という問いに定量的に答えることが難しかった。本ツールは画像のアップロードから統計検定まで全工程をワンクリックで完結させ、p値と可視化パネルをその場で取得できるようにした。実験系研究者がPythonコードを書かずにパラメータ調整と再解析を繰り返せるよう、Streamlit UIを採用している。
 
-1. **核セグメンテーション** — Cellposeによる細胞核の自動検出
-2. **特徴量抽出** — scikit-image regionpropsによる形態・輝度特徴量の定量化
-3. **細胞分類** — 学習済みランダムフォレストモデルによるNormal/Cancerの二値分類
-4. **空間近接度計算** — KDTreeを用いたがん細胞-正常細胞間のユークリッド距離算出
-5. **統計検定** — Proximal/Distal群間のバイオマーカー強度比較（Mann-Whitney U検定）
+## 主要機能
 
-## 主な特徴
+- **核セグメンテーション**: Cellposeによるディープラーニング細胞核検出（未インストール時はOtsu+Watershedで自動代替）
+- **細胞特徴量定量化**: `skimage.measure.regionprops_table` による面積・形状・チャンネル別輝度の一括抽出
+- **Normal/Cancer 二値分類**: scikit-learn互換の学習済みRandomForestモデルによる予測（モデル未指定時はデモ分類）
+- **空間近接度計算**: `scipy.spatial.KDTree` による O(n log n) 最近傍距離算出（がん細胞 → 最近傍正常細胞）
+- **統計検定**: Proximal/Distal群のバイオマーカー発現量比較をMann-Whitney U検定（両側）で実施し、p値を出力
 
-| 機能 | 詳細 |
-|------|------|
-| **Graceful Degradation** | Cellpose未インストール時やGPU不使用時に自動フォールバック |
-| **デモモード** | 合成データによるパイプライン動作確認（モデル・画像不要） |
-| **4パネル可視化** | 空間分布 / ボックスプロット / 距離ヒストグラム / データプレビュー |
-| **CSV出力** | 解析結果のダウンロード機能 |
-| **Config集約** | 全パラメータをdataclassで一元管理 |
+## 技術スタック
 
-## プロジェクト構成
+| カテゴリ | 使用技術 |
+|---|---|
+| セグメンテーション | Cellpose 3.x（DL核検出）/ scikit-image Otsu+Watershed（フォールバック） |
+| 画像処理 / ML | scikit-image `regionprops_table`、scikit-learn RandomForest、joblib |
+| 統計・空間計算 | SciPy `KDTree`、`mannwhitneyu`（両側検定） |
+| 可視化 | Matplotlib、Seaborn（散布図・ボックスプロット・距離ヒストグラム） |
+| UI | Streamlit（ファイルアップロード、サイドバーパラメータ、session_state管理） |
+| インフラ / デプロイ | Streamlit Cloud（GPU不要環境向け `requirements.txt` / WSL+GPU向け `requirements-local.txt`） |
 
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    A[マルチチャンネル\nTIFF 入力] --> B["segment()\nCellpose\n→ Otsu+Watershed"]
+    B --> C["extract_features()\nregionprops_table"]
+    C --> D["classify_cells()\nRandom Forest\nNormal / Cancer"]
+    D --> E["compute_proximity()\nKDTree\ndist_to_normal"]
+    E --> F["run_stat_test()\nProximal vs Distal\nMann-Whitney U"]
+    F --> G["AnalysisResult\ncell_df / p_value\n/ warnings"]
 ```
-Tissue-Spatial-Analysis/
-├── app.py                    # Streamlit UI & 可視化
-├── spatial_analysis_tool.py  # 解析エンジン（SpatialAnalyzer クラス）
-├── config.py                 # 設定・定数の集約
-├── requirements.txt          # 依存パッケージ
-├── .gitignore
-└── README.md
-```
 
-## セットアップ
+3レイヤー構成：
 
-```bash
-# リポジトリをクローン
-git clone https://github.com/<your-username>/Tissue-Spatial-Analysis.git
-cd Tissue-Spatial-Analysis
-
-# 仮想環境の作成・有効化
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 依存パッケージのインストール
-pip install -r requirements.txt
-
-# アプリケーション起動
-streamlit run app.py
-```
+| ファイル | 役割 |
+|---|---|
+| `config.py` | 全定数・デフォルト値を `@dataclass` で集約（`CellposeConfig` / `AnalysisConfig` / `VisualizationConfig`） |
+| `spatial_analysis_tool.py` | `SpatialAnalyzer` クラス — 純粋な解析エンジン（UI依存ゼロ） |
+| `app.py` | Streamlit UI、可視化関数、session_state 管理 |
 
 ## 使用方法
 
-### デモモード（推奨：初回動作確認）
+### セットアップ
+
+```bash
+# Streamlit Cloud / GPU不使用環境
+pip install -r requirements.txt
+
+# ローカル WSL / GPU使用環境（Cellpose含む）
+pip install -r requirements-local.txt
+
+# アプリ起動
+streamlit run app.py
+```
+
+### デモモード（モデル・画像不要）
 
 1. サイドバーの **「合成データでデモ実行」** をON
 2. **Run Analysis** をクリック
-3. 合成された120細胞のデータで全パイプラインが動作確認できます
+3. 120細胞の合成データで全パイプラインの動作を確認できます（p < 0.05 が期待値）
 
 ### 実データ解析
 
 1. サイドバーから学習済みモデル（`.joblib`）をアップロード
-2. 組織画像（`.tif`、多チャンネル）をアップロード
-3. Proximity Threshold 等のパラメータを調整
+2. 組織画像（`.tif`、マルチチャンネル）をアップロード
+3. **Proximity Threshold**（距離閾値・px単位）を調整
 4. **Run Analysis** をクリック
 
-## 入力データ仕様
+### テストデータの生成
 
-| 項目 | 仕様 |
-|------|------|
-| **画像形式** | マルチチャンネルTIFF（shape: `C × H × W`） |
-| **想定チャンネル** | ch0-2: 核・膜マーカー、ch3: バイオマーカー |
-| **分類モデル** | scikit-learn互換の `.joblib` ファイル |
+```bash
+python generate_test_data.py
+# → data/test_tissue_image.tif (4ch, 512×512)
+# → data/test_model.joblib
+```
 
-## 解析手法の詳細
+## 設計上の工夫
 
-### 空間近接度の計算
+**Graceful Degradation**
+依存ライブラリの有無をimport時に検出し、`SpatialAnalyzer._warnings` に追記しながらフォールバックを継続する。Cellpose未インストール → Otsu+Watershed、GPU初期化失敗 → CPU自動切替、モデル未ロード → ランダム分類（seed固定）、バイオマーカー列不一致 → 利用可能な末尾channelを自動選択。
 
-がん細胞から最近傍の正常細胞までのユークリッド距離を、SciPy KDTreeにより O(n log n) で計算します。
+**Demo mode の設計**
+`app.py:generate_demo_data()` はセグメンテーションと特徴量抽出を完全スキップし、DataFrameを直接合成して `compute_proximity` と `run_stat_test` のみを呼び出す。セグメンテーションに依存せずUIの動作確認とデプロイ検証を可能にしている。
 
-$$d = \sqrt{(x_2 - x_1)^2 + (y_2 - y_1)^2}$$
+**Dataclass による設定一元管理**
+`CellposeConfig` / `AnalysisConfig` / `VisualizationConfig` の3つのdataclassに全定数を集約し、マジックナンバーをコード中に散在させない。UIのスライダー範囲（`proximity_threshold_min/max`）も同じdataclassから参照する。
 
-### 統計検定
+**session_state によるステートフルUI**
+解析結果を `st.session_state.result` に保持することで、パラメータ変更後のUI再描画時に不要な再解析を防止する。デモモードのON/OFFフラグも同様に管理している。
 
-距離閾値を基準にがん細胞を **Proximal群** と **Distal群** に分割し、バイオマーカー強度について **Mann-Whitney U検定**（両側検定）を実施します。
+**純粋解析エンジン分離**
+`SpatialAnalyzer` はStreamlitを一切importせず、`AnalysisResult` dataclassを返すだけ。UIフレームワークの差し替えやCLI化・ユニットテスト化が可能な構造になっている。
 
-## 技術スタック
+## 今後の拡張可能性
 
-- **Python 3.10+**
-- **Streamlit** — Web UI
-- **Cellpose** — ディープラーニング核セグメンテーション
-- **scikit-image** — 画像処理・特徴量抽出
-- **scikit-learn** — 細胞分類モデル
-- **SciPy** — KDTree空間検索・統計検定
-- **Matplotlib / Seaborn** — 可視化
-
-## Graceful Degradation 設計
-
-本ツールでは、依存ライブラリが欠けていても可能な範囲で動作を継続する設計を採用しています。
-
-- **cellpose未インストール** → 外部マスクの入力で代替可能
-- **GPU不使用** → 自動的にCPUモードへフォールバック
-- **分類モデル未読込** → ランダム分類によるデモ動作
-- **バイオマーカー列の不一致** → 利用可能な最後のintensityチャンネルを自動選択
-- **サンプル数不足** → 検定をスキップし警告を表示
+- **マルチクラス分類対応**: `classify_cells()` の出力を多値ラベルに拡張し、複数の細胞サブタイプの空間パターンを比較
+- **3D組織スタック対応**: `_to_chw()` の軸判定を `(C, Z, H, W)` に拡張し、confocal Zスタック画像に対応
+- **バッチ解析モード**: `run_pipeline()` をCLIラッパーから呼び出し、複数スライドの一括処理とCSV集計を自動化
 
 ## ライセンス
 
